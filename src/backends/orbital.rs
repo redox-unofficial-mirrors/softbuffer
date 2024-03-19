@@ -1,4 +1,7 @@
 use crate::error::InitError;
+use libredox::call::MmapArgs;
+use libredox::error::Result;
+use libredox::flag;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, OrbitalWindowHandle, RawWindowHandle};
 use std::{cmp, marker::PhantomData, num::NonZeroU32, slice, str};
 
@@ -6,43 +9,34 @@ use crate::backend_interface::*;
 use crate::{Rect, SoftBufferError};
 
 struct OrbitalMap {
-    address: usize,
+    address: *mut u32,
     size: usize,
-    size_unaligned: usize,
 }
 
 impl OrbitalMap {
-    unsafe fn new(fd: usize, size_unaligned: usize) -> syscall::Result<Self> {
-        // Page align size
-        let pages = (size_unaligned + syscall::PAGE_SIZE - 1) / syscall::PAGE_SIZE;
-        let size = pages * syscall::PAGE_SIZE;
-
+    unsafe fn new(fd: usize, size: usize) -> Result<Self> {
         // Map window buffer
         let address = unsafe {
-            syscall::fmap(
+            libredox::call::mmap(MmapArgs {
                 fd,
-                &syscall::Map {
-                    offset: 0,
-                    size,
-                    flags: syscall::PROT_READ | syscall::PROT_WRITE | syscall::MAP_SHARED,
-                    address: 0,
-                },
-            )?
-        };
+                offset: 0,
+                length: size,
+                prot: flag::PROT_READ | flag::PROT_WRITE,
+                flags: flag::MAP_SHARED,
+                addr: core::ptr::null_mut(),
+            })?
+        }
+        .cast();
 
-        Ok(Self {
-            address,
-            size,
-            size_unaligned,
-        })
+        Ok(Self { address, size })
     }
 
     unsafe fn data(&self) -> &[u32] {
-        unsafe { slice::from_raw_parts(self.address as *const u32, self.size_unaligned / 4) }
+        unsafe { slice::from_raw_parts(self.address, self.size / 4) }
     }
 
     unsafe fn data_mut(&self) -> &mut [u32] {
-        unsafe { slice::from_raw_parts_mut(self.address as *mut u32, self.size_unaligned / 4) }
+        unsafe { slice::from_raw_parts_mut(self.address, self.size / 4) }
     }
 }
 
@@ -50,7 +44,8 @@ impl Drop for OrbitalMap {
     fn drop(&mut self) {
         unsafe {
             // Unmap window buffer on drop
-            syscall::funmap(self.address, self.size).expect("failed to unmap orbital window");
+            libredox::call::munmap(self.address.cast(), self.size)
+                .expect("failed to unmap orbital window");
         }
     }
 }
@@ -75,7 +70,7 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> OrbitalImpl<D, W> {
         let mut window_height = 0;
 
         let mut buf: [u8; 4096] = [0; 4096];
-        let count = syscall::fpath(self.window_fd(), &mut buf).unwrap();
+        let count = libredox::call::fpath(self.window_fd(), &mut buf).unwrap();
         let path = str::from_utf8(&buf[..count]).unwrap();
         // orbital:/x/y/w/h/t
         let mut parts = path.split('/').skip(3);
@@ -118,7 +113,7 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> OrbitalImpl<D, W> {
         }
 
         // Tell orbital to show the latest window data
-        syscall::fsync(self.window_fd()).expect("failed to sync orbital window");
+        libredox::call::fsync(self.window_fd()).expect("failed to sync orbital window");
     }
 }
 
@@ -212,7 +207,7 @@ impl<'a, D: HasDisplayHandle, W: HasWindowHandle> BufferInterface for BufferImpl
         match self.pixels {
             Pixels::Mapping(mapping) => {
                 drop(mapping);
-                syscall::fsync(self.imp.window_fd()).expect("failed to sync orbital window");
+                libredox::call::fsync(self.imp.window_fd()).expect("failed to sync orbital window");
                 self.imp.presented = true;
             }
             Pixels::Buffer(buffer) => {
