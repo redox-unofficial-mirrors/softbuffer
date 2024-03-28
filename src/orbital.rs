@@ -3,31 +3,28 @@ use std::{cmp, slice, str};
 
 use crate::SoftBufferError;
 
+use libredox::error::Result;
+
 struct OrbitalMap {
     address: usize,
-    size: usize,
+    size_unaligned: usize,
 }
 
 impl OrbitalMap {
-    unsafe fn new(fd: usize, size_unaligned: usize) -> syscall::Result<Self> {
-        // Page align size
-        let pages = (size_unaligned + syscall::PAGE_SIZE - 1) / syscall::PAGE_SIZE;
-        let size = pages * syscall::PAGE_SIZE;
-
+    unsafe fn new(fd: usize, size_unaligned: usize) -> Result<Self> {
         // Map window buffer
         let address = unsafe {
-            syscall::fmap(
+            libredox::call::mmap(libredox::call::MmapArgs {
                 fd,
-                &syscall::Map {
-                    offset: 0,
-                    size,
-                    flags: syscall::PROT_READ | syscall::PROT_WRITE | syscall::MAP_SHARED,
-                    address: 0,
-                },
-            )?
+                offset: 0,
+                length: size_unaligned,
+                prot: libredox::flag::PROT_READ | libredox::flag::PROT_WRITE,
+                flags: libredox::flag::MAP_SHARED,
+                addr: core::ptr::null_mut(),
+            })? as usize
         };
 
-        Ok(Self { address, size })
+        Ok(Self { address, size_unaligned })
     }
 }
 
@@ -35,7 +32,7 @@ impl Drop for OrbitalMap {
     fn drop(&mut self) {
         unsafe {
             // Unmap window buffer on drop
-            syscall::funmap(self.address, self.size).expect("failed to unmap orbital window");
+            libredox::call::munmap(self.address as *mut (), self.size_unaligned).expect("failed to unmap orbital window");
         }
     }
 }
@@ -57,7 +54,7 @@ impl OrbitalImpl {
         let mut window_height = 0;
         {
             let mut buf: [u8; 4096] = [0; 4096];
-            let count = syscall::fpath(window_fd, &mut buf).unwrap();
+            let count = libredox::call::fpath(window_fd, &mut buf).unwrap();
             let path = str::from_utf8(&buf[..count]).unwrap();
             // orbital:/x/y/w/h/t
             let mut parts = path.split('/').skip(3);
@@ -99,6 +96,6 @@ impl OrbitalImpl {
         }
 
         // Tell orbital to show the latest window data
-        syscall::fsync(window_fd).expect("failed to sync orbital window");
+        libredox::call::fsync(window_fd).expect("failed to sync orbital window");
     }
 }
